@@ -8,6 +8,7 @@
 name: Privacy & Session Checks
 
 on:
+  workflow_dispatch:
   pull_request:
     branches: [main, Test]
   push:
@@ -26,7 +27,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Listar arquivos de código-fonte analisados
         shell: bash
