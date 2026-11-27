@@ -1,0 +1,87 @@
+# Segredos e configuracao local
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+id_rsa*
+credentials*.json
+*service-account*.json
+.npmrc
+.pypirc
+.netrc
+
+# Dados locais e gerados
+*.sqlite
+*.sqlite3
+*.db
+*.log
+*.tfstate*
+node_modules/
+__pycache__/
+.venv/
+dist/
+build/
+coverage/
+
+# Segredos de plataforma e assinatura
+*.p8
+*.mobileprovision
+*.gpg
+*.asc
+*.age
+secrets/
+.dev.vars
+*.secret
+*.secrets
+google-services.json
+GoogleService-Info.plist
+*firebase-adminsdk*.json
+client_secret*.json
+vapid*.json
+keystore.properties
+local.properties
+application-local.*
+application-secret*
+application-prod.*
+
+# Backups e dumps de banco (nao ignorar *.sql: as migracoes precisam subir)
+backups/
+*.dump
+*.sql.gz
+*.sql.zip
+*.backup
+*.bak
+
+# Supabase, Cloudflare e infraestrutura locais
+supabase/.temp/
+supabase/.branches/
+.wrangler/
+.terraform/
+
+# Builds e pacotes
+target/
+.gradle/
+out/
+*.apk
+*.aab
+*.ipa
+*.class
+*.jar
+!**/gradle/wrapper/gradle-wrapper.jar
+
+# Editor e sistema
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Uso interno: nao sobe ao GitHub
+documentos/
+CLAUDE.md
+.claude/
