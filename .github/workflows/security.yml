@@ -9,6 +9,7 @@
 name: Security
 
 on:
+  workflow_dispatch:
   push:
     branches: [main, Test]
   pull_request:

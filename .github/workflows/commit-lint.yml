@@ -5,6 +5,7 @@
 name: Commit & PR Lint
 
 on:
+  workflow_dispatch:
   pull_request:
     branches: [main, Test]
     types: [opened, edited, synchronize, reopened]
@@ -19,6 +20,7 @@ concurrency:
 jobs:
   pr-title:
     name: Título do PR (Conventional Commits)
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -44,6 +46,7 @@ jobs:
 
   commit-trailers:
     name: Commits sem co-autoria de modelo/IA
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
