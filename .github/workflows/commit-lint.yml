@@ -1,0 +1,77 @@
+# Padrões de commit e PR:
+#   - o título do PR segue Conventional Commits;
+#   - nenhum commit do PR contém trailers de co-autoria de modelo/IA
+#     ("Co-authored-by:" ou "Generated with"), proibidos neste repositório.
+name: Commit & PR Lint
+
+on:
+  pull_request:
+    branches: [main, Test]
+    types: [opened, edited, synchronize, reopened]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: commit-lint-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pr-title:
+    name: Título do PR (Conventional Commits)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      pull-requests: read
+    steps:
+      - uses: amannn/action-semantic-pull-request@48f256284bd46cdaab1048c3721360e808335d50 # v6.1.1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          types: |
+            feat
+            fix
+            docs
+            style
+            refactor
+            perf
+            test
+            build
+            ci
+            chore
+            revert
+          requireScope: false
+
+  commit-trailers:
+    name: Commits sem co-autoria de modelo/IA
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Verificar trailers proibidos em cada commit do PR
+        shell: bash
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -uo pipefail
+          status=0
+          while IFS= read -r sha; do
+            [ -z "$sha" ] && continue
+            msg="$(git log -1 --format=%B "$sha")"
+            if printf '%s\n' "$msg" | grep -qiE '^[[:space:]]*co-authored-by[[:space:]]*:'; then
+              echo "::error::Commit ${sha} contém 'Co-authored-by:'. Co-autoria de modelo/IA é proibida neste repositório. Remova a linha (git commit --amend ou git rebase -i) e atualize a branch do PR."
+              status=1
+            fi
+            if printf '%s\n' "$msg" | grep -qi 'generated with'; then
+              echo "::error::Commit ${sha} contém 'Generated with'. Mensagens de commit não podem conter essa assinatura de ferramenta. Remova a linha (git commit --amend ou git rebase -i) e atualize a branch do PR."
+              status=1
+            fi
+          done < <(git rev-list "${BASE_SHA}..${HEAD_SHA}")
+          if [ "$status" -ne 0 ]; then
+            echo "Falha: reescreva os commits afetados e faça push na branch do PR."
+          fi
+          exit "$status"

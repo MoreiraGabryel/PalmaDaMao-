@@ -1,0 +1,168 @@
+# Acessibilidade e qualidade de interface, somente para front-end web.
+#
+# AVISO: este CI NÃO substitui auditoria nem certificação de conformidade com o eMAG,
+# com a ABNT NBR 17225 ou com a WCAG. Ele só detecta regressões AUTOMATIZÁVEIS:
+#   - axe-core com as regras WCAG 2.2 nível A e AA em cada página HTML;
+#   - presença de lang="pt-BR" na tag <html> de cada documento.
+# Conformidade real exige revisão humana, testes com leitores de tela e tecnologias
+# assistivas, e avaliação por especialista.
+#
+# Sem front-end (nenhum script "build" no package.json e nenhum .html), o job termina com sucesso.
+name: Accessibility & Quality
+
+on:
+  pull_request:
+    branches: [main, Test]
+  push:
+    branches: [main, Test]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: accessibility-quality-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  detect:
+    name: Detectar front-end web
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      has_build: ${{ steps.detect.outputs.has_build }}
+      has_html: ${{ steps.detect.outputs.has_html }}
+      has_frontend: ${{ steps.detect.outputs.has_frontend }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: detect
+        name: Detectar front-end
+        shell: bash
+        run: |
+          set -uo pipefail
+          has_build=false
+          if [ -f package.json ] && grep -qE '"build"[[:space:]]*:' package.json; then has_build=true; fi
+          has_html=false
+          if git ls-files | grep -E '\.html?$' | grep -vqE '(^|/)(node_modules|vendor|dist|build)/'; then has_html=true; fi
+          frontend=false
+          if [ "$has_build" = true ] || [ "$has_html" = true ]; then frontend=true; fi
+          {
+            echo "has_build=$has_build"
+            echo "has_html=$has_html"
+            echo "has_frontend=$frontend"
+          } >> "$GITHUB_OUTPUT"
+
+  accessibility:
+    name: Acessibilidade (WCAG 2.2 AA) e idioma pt-BR
+    needs: detect
+    if: needs.detect.outputs.has_frontend == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      HAS_BUILD: ${{ needs.detect.outputs.has_build }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: Build do front-end (somente se houver script build)
+        if: needs.detect.outputs.has_build == 'true'
+        run: |
+          if [ -f package-lock.json ]; then npm ci; else npm install; fi
+          npm run build
+
+      - id: site
+        name: Determinar diretório com as páginas
+        shell: bash
+        run: |
+          set -uo pipefail
+          dir="."
+          if [ "$HAS_BUILD" = "true" ]; then
+            for d in dist build out; do
+              if [ -d "$d" ]; then dir="$d"; break; fi
+            done
+          fi
+          echo "dir=$dir" >> "$GITHUB_OUTPUT"
+          echo "Diretório analisado: $dir"
+
+      - name: Verificar lang="pt-BR" em cada documento HTML
+        shell: bash
+        env:
+          SITE_DIR: ${{ steps.site.outputs.dir }}
+        run: |
+          set -uo pipefail
+          LANG_RE="<html[^>]*[[:space:]]lang[[:space:]]*=[[:space:]]*[\"']?pt-BR[\"']?[[:space:]>]"
+          status=0
+          count=0
+          while IFS= read -r -d '' f; do
+            flat="$(tr '\n' ' ' < "$f")"
+            # Só documentos completos (com <html>); partials e componentes são ignorados.
+            printf '%s' "$flat" | grep -qi '<html' || continue
+            count=$((count + 1))
+            if ! printf '%s' "$flat" | grep -qiE "$LANG_RE"; then
+              echo "::error file=${f}::Tag <html> sem lang=\"pt-BR\". Adicione lang=\"pt-BR\" à tag <html> (WCAG 3.1.1, nível A)."
+              status=1
+            fi
+          done < <(find "$SITE_DIR" -name '*.html' -not -path '*/node_modules/*' -print0)
+          if [ "$count" -eq 0 ]; then
+            echo "::warning::Nenhum documento HTML completo encontrado em ${SITE_DIR}. Verifique o diretório de build."
+          fi
+          exit "$status"
+
+      - name: Iniciar servidor estático local
+        shell: bash
+        env:
+          SITE_DIR: ${{ steps.site.outputs.dir }}
+        run: |
+          set -uo pipefail
+          python3 -m http.server 8080 --bind 127.0.0.1 --directory "$SITE_DIR" > "$RUNNER_TEMP/http.log" 2>&1 &
+          for _ in $(seq 1 30); do
+            if curl -fsS -o /dev/null http://127.0.0.1:8080/; then exit 0; fi
+            sleep 1
+          done
+          echo "::error::Servidor local não respondeu."
+          cat "$RUNNER_TEMP/http.log"
+          exit 1
+
+      - name: axe-core (WCAG 2.2 A/AA) em cada página HTML
+        shell: bash
+        env:
+          SITE_DIR: ${{ steps.site.outputs.dir }}
+        run: |
+          set -uo pipefail
+          status=0
+          pages=0
+          while IFS= read -r -d '' p; do
+            p="${p#./}"
+            pages=$((pages + 1))
+            if [ "$pages" -gt 50 ]; then
+              echo "::warning::Limite de 50 páginas atingido; as demais não foram auditadas."
+              break
+            fi
+            echo "Auditando: $p"
+            if ! npx --yes @axe-core/cli@4.12.1 "http://127.0.0.1:8080/$p" \
+                --tags wcag2a,wcag2aa,wcag21a,wcag21aa,wcag22aa \
+                --exit \
+                --chrome-options="no-sandbox,disable-setuid-sandbox,disable-dev-shm-usage"; then
+              echo "::error file=${SITE_DIR}/${p}::Violações WCAG 2.2 AA detectadas pelo axe (ver saída acima). Corrija as violações listadas."
+              status=1
+            fi
+          done < <(cd "$SITE_DIR" && find . -name '*.html' -not -path '*/node_modules/*' -print0)
+          if [ "$pages" -eq 0 ]; then echo "Nenhuma página HTML para auditar."; fi
+          exit "$status"
+
+      - name: Encerrar servidor local
+        if: always()
+        run: pkill -f "http.server 8080" || true
+
+  no-frontend:
+    name: Sem front-end web
+    needs: detect
+    if: needs.detect.outputs.has_frontend != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Mensagem
+        run: echo "Nenhum front-end web detectado (sem script build no package.json e sem arquivos .html). Nada a verificar; job concluído com sucesso."

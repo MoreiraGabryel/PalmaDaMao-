@@ -1,0 +1,17 @@
+# Atualizacoes semanais. Os PRs tem como alvo a branch Test (integracao).
+# Por enquanto so github-actions: ainda nao ha manifestos de outras stacks, e o Dependabot
+# acusa erro para ecossistema sem manifesto. Ao criar package.json, requirements.txt/pyproject.toml,
+# go.mod ou Dockerfile, adicione o bloco do ecossistema correspondente (npm, pip, gomod, docker).
+# Mantem tambem os SHAs fixados das actions de terceiros atualizados.
+version: 2
+
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    target-branch: "Test"
+    commit-message:
+      prefix: "chore(deps)"
+    labels:
+      - "dependencies"

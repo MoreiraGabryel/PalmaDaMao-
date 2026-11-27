@@ -1,0 +1,248 @@
+# Verificações estáticas de privacidade (LGPD, Lei 13.709/2018) e de sessão.
+#
+# Heurísticas conservadoras, implementadas com grep/bash. Elas pegam padrões óbvios;
+# NÃO substituem revisão humana nem análise de fluxo de dados. Falsos positivos devem ser
+# resolvidos ajustando o código (ou movendo fixtures para pastas de teste), não desligando o check.
+#
+# Só analisa arquivos rastreados pelo git, excluindo dependências, builds, lockfiles e este workflow.
+name: Privacy & Session Checks
+
+on:
+  pull_request:
+    branches: [main, Test]
+  push:
+    branches: [main, Test]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: privacy-session-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  privacy-session:
+    name: Privacidade (LGPD) e sessão
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Listar arquivos de código-fonte analisados
+        shell: bash
+        run: |
+          set -uo pipefail
+          git ls-files \
+            | grep -vE '(^|/)(node_modules|vendor|dist|build|\.git)/' \
+            | grep -vE '(^|/)(package-lock\.json|npm-shrinkwrap\.json|yarn\.lock|pnpm-lock\.yaml|poetry\.lock|Pipfile\.lock|composer\.lock|go\.sum|Cargo\.lock)$' \
+            | grep -vxE '\.github/workflows/privacy-session-checks\.yml' \
+            | grep -E '\.(js|jsx|ts|tsx|mjs|cjs|vue|svelte|html?|py|go|java|kt|rb|php|cs|rs|json|ya?ml|toml|ini|cfg|conf)$|(^|/)Dockerfile[^/]*$' \
+            > "$RUNNER_TEMP/source-files.txt" || true
+          echo "Arquivos analisados: $(wc -l < "$RUNNER_TEMP/source-files.txt")"
+
+      - name: "LGPD - logs com dados pessoais ou credenciais"
+        if: always()
+        shell: bash
+        run: |
+          set -uo pipefail
+          mapfile -t FILES < "$RUNNER_TEMP/source-files.txt"
+          [ "${#FILES[@]}" -eq 0 ] && { echo "Nenhum arquivo de código-fonte."; exit 0; }
+          PAT="(console\.(log|info|warn|error|debug)|\bprint(ln)?|\blogger\.[a-z]+|\blogging\.[a-z]+|\blog\.[a-z]+|System\.out\.print(ln)?|fmt\.Print(f|ln)?|log\.Print(f|ln)?)[[:space:]]*\(.*\b(cpf|senha|password|passwd|token|cartao|card_number|cardnumber|cvv)\b"
+          status=0
+          while IFS= read -r h; do
+            [ -z "$h" ] && continue
+            f="${h%%:*}"; rest="${h#*:}"; n="${rest%%:*}"
+            echo "::error file=${f},line=${n}::Log com possível dado pessoal ou credencial (cpf, senha, password, token, cartão). Remova o dado do log ou mascare-o antes de registrar. LGPD art. 6º (necessidade) e art. 46 (segurança)."
+            status=1
+          done < <(grep -inE "$PAT" -- "${FILES[@]}" || true)
+          exit "$status"
+
+      - name: "LGPD - CPF/CNPJ reais hardcoded (fora de pastas de teste)"
+        if: always()
+        shell: bash
+        run: |
+          set -uo pipefail
+          mapfile -t FILES < "$RUNNER_TEMP/source-files.txt"
+          [ "${#FILES[@]}" -eq 0 ] && { echo "Nenhum arquivo de código-fonte."; exit 0; }
+          # Pastas e arquivos de teste ficam de fora. Fixtures fora dessas pastas são analisadas.
+          TEST_RE='(^|/)(tests?|__tests__|spec|specs|__mocks__|mocks?)/|\.(test|spec)\.[A-Za-z]+$|(^|/)test_[^/]*\.py$|_test\.(go|py)$'
+          nontest=()
+          for f in "${FILES[@]}"; do
+            [[ "$f" =~ $TEST_RE ]] || nontest+=("$f")
+          done
+          [ "${#nontest[@]}" -eq 0 ] && { echo "Nenhum arquivo fora de pastas de teste."; exit 0; }
+
+          # Valida dígitos verificadores: só falha para números que seriam CPF/CNPJ válidos.
+          valid_cpf() {
+            local d="${1//[^0-9]/}" t i s r
+            [ "${#d}" -eq 11 ] || return 1
+            [[ "$d" =~ ^([0-9])\1{10}$ ]] && return 1
+            for t in 9 10; do
+              s=0
+              for ((i = 0; i < t; i++)); do s=$(( s + ${d:i:1} * (t + 1 - i) )); done
+              r=$(( (s * 10) % 11 )); [ "$r" -eq 10 ] && r=0
+              [ "$r" -eq "${d:t:1}" ] || return 1
+            done
+            return 0
+          }
+          valid_cnpj() {
+            local d="${1//[^0-9]/}" i s r
+            local w1=(5 4 3 2 9 8 7 6 5 4 3 2) w2=(6 5 4 3 2 9 8 7 6 5 4 3 2)
+            [ "${#d}" -eq 14 ] || return 1
+            [[ "$d" =~ ^([0-9])\1{13}$ ]] && return 1
+            s=0; for i in "${!w1[@]}"; do s=$(( s + ${d:i:1} * w1[i] )); done
+            r=$(( s % 11 )); if [ "$r" -lt 2 ]; then r=0; else r=$(( 11 - r )); fi
+            [ "$r" -eq "${d:12:1}" ] || return 1
+            s=0; for i in "${!w2[@]}"; do s=$(( s + ${d:i:1} * w2[i] )); done
+            r=$(( s % 11 )); if [ "$r" -lt 2 ]; then r=0; else r=$(( 11 - r )); fi
+            [ "$r" -eq "${d:13:1}" ] || return 1
+            return 0
+          }
+
+          status=0
+          RE="[0-9]{3}\.[0-9]{3}\.[0-9]{3}-[0-9]{2}|[0-9]{2}\.[0-9]{3}\.[0-9]{3}/[0-9]{4}-[0-9]{2}"
+          while IFS= read -r h; do
+            [ -z "$h" ] && continue
+            f="${h%%:*}"; rest="${h#*:}"; n="${rest%%:*}"; m="${rest#*:}"
+            if valid_cpf "$m" || valid_cnpj "$m"; then
+              echo "::error file=${f},line=${n}::CPF/CNPJ real com máscara no código. Remova o valor; em testes use um número fictício dentro de pasta de teste (ex.: 000.000.000-00). Dados pessoais não devem ficar versionados (LGPD art. 6º)."
+              status=1
+            fi
+          done < <(grep -noE "$RE" -- "${nontest[@]}" || true)
+          exit "$status"
+
+      - name: "Sessão - cookies sem HttpOnly, Secure e SameSite"
+        if: always()
+        shell: bash
+        run: |
+          set -uo pipefail
+          mapfile -t FILES < "$RUNNER_TEMP/source-files.txt"
+          [ "${#FILES[@]}" -eq 0 ] && { echo "Nenhum arquivo de código-fonte."; exit 0; }
+          COOKIE_RE="set-cookie|res\.cookie\(|response\.cookie\(|setcookie\(|set_cookie\(|cookies\.set\(|SESSION_COOKIE"
+          # Verdadeiro se alguma linha candidata estiver a até 10 linhas da referência.
+          near() {
+            local ref="$1" x
+            shift
+            for x in "$@"; do
+              if (( x - ref <= 10 && ref - x <= 10 )); then return 0; fi
+            done
+            return 1
+          }
+          status=0
+          for f in "${FILES[@]}"; do
+            mapfile -t cookie_lines < <(grep -inE "$COOKIE_RE" -- "$f" | cut -d: -f1)
+            [ "${#cookie_lines[@]}" -eq 0 ] && continue
+            mapfile -t http_lines < <(grep -inE 'httponly' -- "$f" | cut -d: -f1)
+            mapfile -t secure_lines < <(grep -inE '(^|[^[:alpha:]])secure([^[:alpha:]]|$)' -- "$f" | cut -d: -f1)
+            mapfile -t samesite_lines < <(grep -inE 'samesite' -- "$f" | cut -d: -f1)
+            for n in "${cookie_lines[@]}"; do
+              missing=""
+              near "$n" "${http_lines[@]}" || missing="$missing HttpOnly"
+              near "$n" "${secure_lines[@]}" || missing="$missing Secure"
+              near "$n" "${samesite_lines[@]}" || missing="$missing SameSite"
+              if [ -n "$missing" ]; then
+                echo "::error file=${f},line=${n}::Cookie de sessão sem flag:${missing} (verificado nas 10 linhas ao redor). Defina HttpOnly, Secure e SameSite (Lax ou Strict) na criação do cookie."
+                status=1
+              fi
+            done
+          done
+          exit "$status"
+
+      - name: "Segurança - segredo fixo, TLS desabilitado, CORS com credenciais"
+        if: always()
+        shell: bash
+        run: |
+          set -uo pipefail
+          mapfile -t FILES < "$RUNNER_TEMP/source-files.txt"
+          [ "${#FILES[@]}" -eq 0 ] && { echo "Nenhum arquivo de código-fonte."; exit 0; }
+          TEST_RE='(^|/)(tests?|__tests__|spec|specs|__mocks__|mocks?)/|\.(test|spec)\.[A-Za-z]+$|(^|/)test_[^/]*\.py$|_test\.(go|py)$'
+          nontest=()
+          for f in "${FILES[@]}"; do
+            [[ "$f" =~ $TEST_RE ]] || nontest+=("$f")
+          done
+          status=0
+          # scan <descrição> <opções grep> <regex> <arquivos...>
+          scan() {
+            local desc="$1" opts="$2" re="$3" h f rest n
+            shift 3
+            [ "$#" -gt 0 ] || return 0
+            while IFS= read -r h; do
+              [ -z "$h" ] && continue
+              f="${h%%:*}"; rest="${h#*:}"; n="${rest%%:*}"
+              echo "::error file=${f},line=${n}::${desc}"
+              status=1
+            done < <(grep "$opts" "$re" -- "$@" || true)
+          }
+          scan "Segredo/JWT/chave de sessão fixo no código. Carregue de variável de ambiente ou cofre de segredos e rotacione o valor já exposto." -inE \
+            "((jwt|session|secret)[_-]?(secret|key)|secret)[[:space:]]*[:=][[:space:]]*[\"'][^\"'[:space:]]{8,}[\"']" \
+            "${nontest[@]}"
+          scan "Validação de certificado TLS desabilitada (verify=False, rejectUnauthorized: false, InsecureSkipVerify ou NODE_TLS_REJECT_UNAUTHORIZED=0). Reative a validação; use CA própria se necessário. LGPD art. 46 e ABNT NBR ISO/IEC 27001." -inE \
+            "verify[[:space:]]*=[[:space:]]*False|rejectUnauthorized[[:space:]]*:[[:space:]]*false|InsecureSkipVerify[[:space:]]*:[[:space:]]*true|NODE_TLS_REJECT_UNAUTHORIZED[[:space:]]*=[[:space:]]*[\"']?0" \
+            "${nontest[@]}"
+          # CORS: origem curinga e credenciais no mesmo arquivo.
+          WILD_RE="Access-Control-Allow-Origin.*\*|origin[\"']?[[:space:]]*:[[:space:]]*[\"']\*[\"']|allow_origins[[:space:]]*=[[:space:]]*\[[[:space:]]*[\"']\*"
+          CRED_RE="Access-Control-Allow-Credentials.*true|credentials[\"']?[[:space:]]*:[[:space:]]*true|allow_credentials[[:space:]]*=[[:space:]]*True|supports_credentials[[:space:]]*=[[:space:]]*True|AllowCredentials[\"']?[[:space:]]*:[[:space:]]*true"
+          for f in "${nontest[@]}"; do
+            if grep -iqE "$WILD_RE" -- "$f" && grep -iqE "$CRED_RE" -- "$f"; then
+              echo "::error file=${f}::CORS com origem '*' combinado com credenciais. Navegadores bloqueiam isso e a configuração expõe sessões. Liste as origens permitidas explicitamente."
+              status=1
+            fi
+          done
+          exit "$status"
+
+      - name: "Produção - modo debug ou desenvolvimento ativo"
+        if: always()
+        shell: bash
+        run: |
+          set -uo pipefail
+          mapfile -t FILES < "$RUNNER_TEMP/source-files.txt"
+          [ "${#FILES[@]}" -eq 0 ] && { echo "Nenhum arquivo de código-fonte."; exit 0; }
+          debug_files=(); prod_files=()
+          for f in "${FILES[@]}"; do
+            lower="${f,,}"
+            [[ "$lower" =~ (dev|local|test|example|sample|mock) ]] || debug_files+=("$f")
+            [[ "$lower" =~ (prod|docker|compose|deploy|k8s|helm|dockerfile) ]] && prod_files+=("$f")
+          done
+          status=0
+          scan() {
+            local desc="$1" opts="$2" re="$3" h f rest n
+            shift 3
+            [ "$#" -gt 0 ] || return 0
+            while IFS= read -r h; do
+              [ -z "$h" ] && continue
+              f="${h%%:*}"; rest="${h#*:}"; n="${rest%%:*}"
+              echo "::error file=${f},line=${n}::${desc}"
+              status=1
+            done < <(grep "$opts" "$re" -- "$@" || true)
+          }
+          scan "DEBUG=True em configuração que não é de desenvolvimento. Use variável de ambiente e desligue o debug em produção (expõe stack traces e dados)." -nE \
+            "^[[:space:]]*DEBUG[[:space:]]*=[[:space:]]*True([[:space:]]|#|$)" "${debug_files[@]}"
+          scan "app.run(debug=True) fora de ambiente de desenvolvimento. Desligue o debug em produção." -inE \
+            "\.run\(.*debug[[:space:]]*=[[:space:]]*True" "${debug_files[@]}"
+          scan "NODE_ENV=development em arquivo de produção/deploy. Defina NODE_ENV=production." -inE \
+            "NODE_ENV[[:space:]]*[:=][[:space:]]*[\"']?development" "${prod_files[@]}"
+          exit "$status"
+
+      - name: "Sessão - .env versionado"
+        if: always()
+        shell: bash
+        run: |
+          set -uo pipefail
+          status=0
+          while IFS= read -r f; do
+            [ -z "$f" ] && continue
+            echo "::error file=${f}::Arquivo de ambiente versionado. Remova do git (git rm --cached), inclua no .gitignore, mantenha só .env.example com valores fictícios e rotacione qualquer segredo que já tenha sido commitado."
+            status=1
+          done < <(git ls-files | grep -E '(^|/)\.env([.][^/]*)?$' | grep -vE '(^|/)\.env\.(example|sample|template)$' || true)
+          exit "$status"
+
+      - name: "Documentação - SECURITY.md e PRIVACY.md na raiz (aviso)"
+        if: always()
+        shell: bash
+        run: |
+          set -uo pipefail
+          for doc in SECURITY.md PRIVACY.md; do
+            if [ ! -f "$doc" ]; then
+              echo "::warning file=${doc}::${doc} ausente na raiz. PRIVACY.md deve trazer a política de privacidade e o tratamento de dados pessoais (LGPD, Lei 13.709/2018); SECURITY.md deve trazer a política de segurança e o canal de divulgação de vulnerabilidades. Aviso apenas: não falha o workflow."
+            fi
+          done
